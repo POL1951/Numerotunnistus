@@ -1,0 +1,22 @@
+{
+  "source_type": "MP4-tiedosto",
+  "ndi_source": "",
+  "stream_url": "",
+  "interval": 0.1,
+  "duplicate_seconds": 10.0,
+  "confidence": 0.85,
+  "device": "auto",
+  "roi": null,
+  "exclusion": null,
+  "confirmation_count": 4,
+  "confirmation_window": 2.0,
+  "track_gap": 2.0,
+  "debug_frames": false,
+  "minimum_text_height": 28.0,
+  "dominance_enabled": true,
+  "dominance_share": 0.65,
+  "dominance_ratio": 3.0,
+  "dominance_confidence": 0.8,
+  "dominance_track_quality": 0.7,
+  "dominance_max_alternative_frames": 1
+}
