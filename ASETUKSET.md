@@ -511,11 +511,18 @@ testatusta esimerkistä: tarkista käyttöliittymä ja ajon `ajo.json`.
 | Vierekkäiset juoksijat sekoittuvat | Tarkista tarkistuskuvien laatikot/seuranta-ID:t, `liitokset.jsonl`:n kustannukset, `liitoskustannusten_ero_alle_rajan`, katkaistut jaksot ja nollalaatuinen aloitusruutu. Tarkista `liitoslaatu` ja vahvat numerovaihtoehdot samassa jaksossa. | Paranna kuvakulmaa, erottuvuutta ja aluevalintaa. Älä laske Liitoslaatua tai salli lisää poikkeamia vain saadaksesi rivin: ne voivat helpottaa sekoittuneen jakson hyväksyntää. Numeroteksti ei ole seurannan yhdistämiskriteeri. |
 | Livekuva toimii mutta tunnistus on hidas | Vertaa vastaanotettujen, OCR:lle annettujen ja valmistuneiden kuvien laskureita. Katso toteutunut näytenopeus, viive, aktiivisen kutsun kesto, ensimmäisen kutsun alku/loppu sekä todellinen laite (`gpu:0`/CPU). Tarkista `ocr_diagnostiikka.jsonl`, tracebackit, debug-kuvien määrä ja kerran tehtävän syötevertailun viesti. Esikatselun FPS ei ole OCR:n FPS. | Varmista ensin GPU tai rajaa turhaa kuva-alaa; kytke tarpeeton debug-tallennus pois. Suurempi näyteväli vähentää kuormaa mutta myös vahvistuksia. Pienempi väli ei nopeuta yksittäistä OCR-kutsua. Sovita vahvistusikkuna mitattuun nopeuteen, älä peitä jumittuvaa kutsua rajoja laskemalla. |
 
-Liveketjun kaikki raakatekstit tallentuvat myös tyhjällä tuloksella.
+Liveketjun raakatekstit tallentuvat myös tyhjällä tuloksella kiertäviin teknisiin lokeihin.
 Raakatekstit ja niiden syötekuvat näkyvät käyttöliittymän lokissa rajatusti;
-tarkista täydellinen JSONL-tiedosto, jos numeron yksittäinen lukukerta ei
+tarkista JSONL-tiedosto ja sen `.1`–`.3`-osat, jos numeron yksittäinen lukukerta ei
 näy loki-ikkunassa. MP4:n `raakahavainnot.jsonl` sisältää seurantaan päätyneet
 numerot, ei kaikkia PaddleOCR:n sanatekstejä. Katso aina kyseisen ajon kansiota.
+
+OCR-syötekuvat ja vastaanottokuvien sarja tallentuvat vain debugissa, jonka
+yhteinen kuvaraja on 256 MiB/istunto. Jokaisen teknisen lokin raja on 2 MiB
+ja kolme vanhempaa osaa; vanhin osa korvataan kierrätyksessä. CSV:t eivät kierrä.
+Normaalitilan JPEG-tarkistuskuvia on hyväksytylle yksi ja epävarmalle
+tapahtumalle enintään kolme yhteensä. Kuvattomallakin vaihtoehdolla on CSV-rivi.
+Katso [tallennusohje](TALLENNUS_OHJE.md) levytilavaroituksista ja rajojen vaikutuksista.
 
 Laskennan lähteet: `numeric_text`, `Settings.validate`, `process_video` ja
 käyttöliittymän kentät (`numerontunnistin_paikallinen.py`);

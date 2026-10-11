@@ -15,8 +15,12 @@ virallisia maaliintuloaikoja.
 - Live-vastaanotto erillisessä prosessissa, rajattu tuoreimman kuvan puskuri,
   hallittu uudelleenyhdistys ja seurantajaksojen erottaminen yhteyskatkossa.
 - CSV, tarkistuskuvat, epävarmat havainnot ja päätösten perustelut.
+- Oikean reunan havaintolista: numero ja paikallinen vastaanottokellonaika
+  tai MP4:n videon aika muodossa `HH:mm:ss`, aikajärjestyksessä.
+- Listan CSV-vienti tunnistuksen aikana: puolipiste-erotin ja UTF-8 BOM.
+- JPEG-tarkistuskuvat, rajattu debug, kiertävät tekniset lokit ja levytilan näyttö.
 - Live-kuvamäärät, OCR-kutsujen alku/loppu/kesto, näytenopeus, viive ja tracebackit.
-- Täsmälliset OCR-syötekuvat, kaikkien raakatekstien loki ja syötteen uudelleenvertailu.
+- Täsmälliset OCR-syötekuvat debugissa, kiertävä raakatekstiloki ja syötteen uudelleenvertailu.
 - JSON-asetusten lataus, tallennus ja viimeksi käytettyjen asetusten palautus.
 - Toistettava parametrivertailu MP4-videon ja erillisen vertailutotuuden avulla.
 
@@ -164,8 +168,30 @@ jatkuisi. Käyttöliittymä näyttää CSV-määrän ja loki seurannan estävät
 Live-CSV:n `vastaanotto_kellonaika` ja `istunnon_aika_s` ovat vastaanottohetken
 aikoja, eivät virallisia maaliintuloaikoja. Katkon yli havaintoja ei yhdistetä.
 
-`ocr_raakatekstit.jsonl` sisältää kaikki OCR-tekstit ennen numerosuodatusta.
-`ocr_syotteet/` tallentaa rajatusti täsmällisiä OCR-syötteitä ja saman ruudun
+Oikealla oleva **Tunnistetut numerot** -paneeli näyttää hyväksytyt havainnot.
+Liveaika on havainnon kuvan mukana säilytetty paikallinen vastaanottohetki,
+MP4-aika videon alusta kulunut aika; molemmat muodossa `HH:mm:ss`.
+Lista on aikajärjestyksessä ja seuraa uusinta havaintoa, kun käyttäjä ei selaa
+vanhempia. **Vie lista CSV:ksi** avaa Tallenna nimellä -ikkunan ja vie koko
+nykyisen listan, myös tunnistuksen aikana: live `numero;kellonaika`,
+MP4 `numero;videon_aika`. Vienti ei tyhjennä listaa. Pysäytys säilyttää listan,
+uusi istunto aloittaa uuden; aiemmat yksityiskohtaiset tulostiedostot säilyvät.
+
+Normaalitilassa hyväksytylle tallennetaan yksi paras JPEG-kuva laadulla 90,
+epävarmalle seurantatapahtumalle enintään kolme kuvaa yhteensä. Kaikki
+epävarmat CSV-rivit säilyvät, vaikka jokaiselle vaihtoehdolle ei tule kuvaa.
+Debug on oletuksena pois, kuvaraja 256 MiB/istunto. Tekniset lokit kiertävät
+2 MiB:n osissa (aktiivinen ja kolme varmuuskopiota); CSV:t eivät kierrä.
+Alareuna näyttää tuloskansion, istunnon koon ja vapaan levytilan.
+Alle 1 GiB:ssa varoitetaan, ja 256 MiB:n vararajalla kuvat keskeytetään,
+mutta tunnistus ja CSV jatkuvat niin kauan kuin kirjoittaminen onnistuu.
+Livevideota ei tallenneta automaattisesti. [Tallennusohje](TALLENNUS_OHJE.md)
+selittää rajat, varoitukset ja mitatun tilantarpeen; [liveohje](LIVE_OHJE.md)
+kuvaa lähteen käytön ja vastaanottoajat.
+
+`ocr_raakatekstit.jsonl` sisältää OCR-tekstit ennen numerosuodatusta;
+teknisten lokien vanhimmat osat korvataan kokorajan täyttyessä.
+`ocr_syotteet/` tallentaa vain debugissa täsmällisiä OCR-syötteitä ja saman ruudun
 vastaanottokuvia. `ocr_syotevertailu.json` vertaa ensimmäisen numerollisen
 syötteen PNG-uudelleenajoa yhteiseen MP4/live-OCR-toteutukseen.
 `ocr_seurantaketju.jsonl` jäljittää havainnot seurantaan ja hyväksymisehtoihin.
@@ -215,6 +241,7 @@ työpöydän ja Tkinterin. Oikea OCR-testi tarvitsee paikalliset mallit.
 |---|---|
 | `numerontunnistin_paikallinen.py` | Tkinter-käyttöliittymä, asetukset, PaddleEngine ja MP4-ajo |
 | `havaintoseuranta.py`, `seurannan_tallennus.py` | Seuranta, hyväksymisehdot, CSV ja tarkistuskuvat |
+| `tallennusrajat.py` | Kuvabudjetti, levytilan seuranta ja teknisten lokien kierrätys |
 | `live_video.py`, `live_vastaanotin.py` | Vastaanottoprosessi, tuorein kuva, live-OCR ja diagnostiikka |
 | `parametrivertailu.py` | Koesuunnitelma ja parametrien arviointi |
 | `test_*.py` | Tekninen regressiotestistö |
@@ -237,7 +264,8 @@ Skripti ei puske eikä korvaa olemassa olevaa etärepositoriota. Jos etäreposit
 ei voi lukea, paikallinen valmistelu on mahdollista, mutta ennen myöhempää pushia
 on tarkistettava sen historia ja sovitettava paikallinen haara siihen.
 
-Viimeisin tekninen varmennus: 42 testiä sekä MP4:n GPU/offline-OCR.
-Oikeat aiemmin tallennetut NDI-aluekuvat on tunnistettu, mutta viimeisintä
-seurannan päättymiskorjausta ei ole vielä varmennettu tuoreella live-NDI:llä
-usealla lapulla. HTTP-liveputken tallennus ja uudelleenyhdistyminen on testattu.
+Käyttäjä on kokeillut nykyistä versiota ja arvioi sen toimivan aika hyvin.
+Tekniset testit kattavat MP4-/liveputken, asetukset, havaintolistan, CSV-viennin
+ja tallennusrajat. HTTP-liveputken tallennusta ja uudelleenyhdistymistä on testattu,
+samoin oikeiden aiemmin tallennettujen NDI-aluekuvien OCR:ää. Nämä tarkistukset
+ja käyttäjäkokeilu eivät ole kattava validointi kilpailuolosuhteissa.

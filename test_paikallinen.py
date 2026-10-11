@@ -75,7 +75,8 @@ class Tests(unittest.TestCase):
         self.assertEqual(summary['processed_frames'], 20)
         self.assertEqual(summary['saved_detections'], 3)
         self.assertFalse((out / 'debug').exists())
-        self.assertEqual(len(list((out / 'kuvat').glob('*.png'))), 6)
+        self.assertEqual(len(list((out / 'kuvat').glob('*.jpg'))), 3)
+        self.assertFalse(list((out / 'kuvat').glob('*.png')))
         with (out / 'havainnot.csv').open(encoding='utf-8-sig') as file:
             rows = list(csv.DictReader(file, delimiter=';'))
         self.assertEqual({r['numero'] for r in rows}, {'1', '9', '123'})

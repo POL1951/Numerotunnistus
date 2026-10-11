@@ -2,6 +2,8 @@
 .gitignore
 README.md
 ASETUKSET.md
+LIVE_OHJE.md
+TALLENNUS_OHJE.md
 repository-files.txt
 prepare_commit.ps1
 kaynnista_paikallinen.ps1
@@ -13,6 +15,7 @@ examples/numerot.example.csv
 numerontunnistin_paikallinen.py
 havaintoseuranta.py
 seurannan_tallennus.py
+tallennusrajat.py
 live_video.py
 live_vastaanotin.py
 parametrivertailu.py
@@ -25,3 +28,5 @@ test_havaintoseuranta.py
 test_live.py
 test_ocr_raakatekstit.py
 test_paikallinen.py
+test_tallennusrajat.py
+test_havaintolista.py

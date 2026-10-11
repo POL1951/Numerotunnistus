@@ -17,6 +17,7 @@ from urllib.parse import urlsplit, urlunsplit, unquote
 import numpy as np
 from havaintoseuranta import BibTracker, box_of, intersection
 from seurannan_tallennus import TrackRecorder, save_png
+from tallennusrajat import RotatingText
 
 BASE = Path(__file__).resolve().parent
 BRIDGE = BASE / 'live_vastaanotin.py'
@@ -228,9 +229,13 @@ class ClockCSV:
 
 
 class LiveRecorder(TrackRecorder):
-    def __init__(self, output, settings):
+    def __init__(self, output, settings, report=lambda text: None, on_storage=None):
         self.clocks = {}
-        super().__init__(output, settings)
+        super().__init__(output, settings, report=report, on_storage=on_storage)
+
+    def accepted_event(self, row):
+        # Same received frame timestamp as the existing automatic CSV row.
+        return dict(row, vastaanotto_aikaleima=self.clocks[row['videon_aika_s']])
 
     def _csv(self, name, header):
         writer = super()._csv(name, header + ['vastaanotto_kellonaika', 'istunnon_aika_s'])
@@ -242,6 +247,8 @@ class LiveDiagnostics:
     def __init__(self):
         self.lock = threading.Lock()
         self.path = None
+        self.writer = None
+        self.report = lambda text: None
         self.data = dict(phase='ei käynnissä', submitted=0, completed=0, processed=0,
                          discarded=0, first_start=None, first_end=None, first_duration=None,
                          first_failed=False, active_start=None, error=None)
@@ -249,6 +256,9 @@ class LiveDiagnostics:
     def attach(self, path):
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        if self.writer:
+            self.writer.close()
+        self.writer = RotatingText(self.path, lambda text: self.report(text))
         self.update(phase='työntekijäsäie käynnistyi')
 
     def update(self, **changes):
@@ -257,9 +267,10 @@ class LiveDiagnostics:
                 return
             self.data.update(changes)
             if self.path:
-                with self.path.open('a', encoding='utf-8') as file:
-                    file.write(json.dumps(dict(time=datetime.now().astimezone().isoformat(), **self.data),
-                                          ensure_ascii=False)+'\n')
+                self.writer.write(json.dumps(dict(time=datetime.now().astimezone().isoformat(), **self.data),
+                                             ensure_ascii=False)+'\n')
+                self.writer.flush()
+                self.writer.close()  # Vastaanottaja ja GUI voivat jäädä eloon istunnon jälkeen.
 
     def snapshot(self):
         with self.lock:
@@ -277,8 +288,9 @@ def retire_live_without_ocr(tracker, timestamp):
     return retired
 
 
-def process_live(receiver, settings, engine, stop, report, preview, output_root=None, diagnostics=None):
+def process_live(receiver, settings, engine, stop, report, preview, output_root=None, diagnostics=None, on_accepted=None, on_storage=None):
     diagnostics = diagnostics or LiveDiagnostics()
+    diagnostics.report = report
     diagnostics.update(phase='live-ajon tallennuksen alustus')
     settings.validate()
     output = (output_root or BASE/'paikalliset_tulokset') / datetime.now().strftime('%Y%m%d_%H%M%S_%f')
@@ -292,16 +304,17 @@ def process_live(receiver, settings, engine, stop, report, preview, output_root=
         device=engine.device, timestamp_source='local reception wall clock and monotonic session time',
         age_clock=time.get_clock_info('monotonic').implementation,
         time_meaning='OCR-havainnon vastaanottoaika, ei virallinen maaliintuloaika'), ensure_ascii=False, indent=2), encoding='utf-8')
-    recorder = LiveRecorder(output, settings)
+    recorder = LiveRecorder(output, settings, report=report, on_storage=on_storage)
+    recorder.on_accepted = on_accepted
+    recorder.storage.status(force=True)
     audit = recorder._file('ocr_raakatekstit.jsonl')
     chain = recorder._file('ocr_seurantaketju.jsonl')
     sample_dir = output/'ocr_syotteet'
-    sample_dir.mkdir()
-    captured_texts = set()
+    if settings.debug_frames:
+        sample_dir.mkdir()
     replay_verified = False
     last_tracking_status = None
-    if diagnostics.path is None:
-        diagnostics.attach(output/'ocr_diagnostiikka.jsonl')
+    diagnostics.attach(output/'ocr_diagnostiikka.jsonl')
     tracker = BibTracker(settings)
     generation = None
     sequence = 0
@@ -378,15 +391,16 @@ def process_live(receiver, settings, engine, stop, report, preview, output_root=
             duration = time.monotonic()-ocr_started
             ocr_ended_wall = datetime.now().astimezone().isoformat(timespec='milliseconds')
             raw = getattr(engine, 'last_raw', [])
-            new_texts = {item['text'] for item in raw} - captured_texts
-            # Rajattu kuvamäärä; kaikki raakatekstit säilyvät JSONL:ssä myös ilman numeroita.
-            capture = submitted == 1 or (new_texts and len(captured_texts) < 100)
+            # Syötekuvat vain debugissa; kaikki tekniset lokit kiertävät kokorajalla.
+            capture = settings.debug_frames and not recorder.storage.debug_stopped and not recorder.storage.images_stopped
             sample = None
             if capture:
                 sample = f'ocr_syotteet/ruutu_{sequence:09d}'
-                save_png(output/(sample+'_ocr.png'), preserved_input)
-                save_png(output/(sample+'_vastaanotto.png'), frame)
-                captured_texts.update(new_texts)
+                input_saved = recorder.debug_image(output/(sample+'_ocr.png'), preserved_input)
+                recorder.debug_image(output/(sample+'_vastaanotto.png'), frame)
+                if not input_saved:
+                    sample = None
+                    capture = False
             audit.write(json.dumps(dict(ruutu=sequence, aika_s=timestamp, raakatekstit=raw,
                 numeroiksi_tulkitut=[n for n,_,_ in found], kuva=sample, shape=list(crop.shape),
                 dtype=str(crop.dtype), kanavat='BGR', strides=list(crop.strides),
@@ -408,7 +422,10 @@ def process_live(receiver, settings, engine, stop, report, preview, output_root=
                     pixels_identical=np.array_equal(saved_image,preserved_input),
                     raw_identical=raw == getattr(engine,'last_raw',[]),
                     implementation='PaddleEngine, yhteinen MP4/live-toteutus')
-                (output/'ocr_syotevertailu.json').write_text(json.dumps(replay,ensure_ascii=False,indent=2),encoding='utf-8')
+                try:
+                    (output/'ocr_syotevertailu.json').write_text(json.dumps(replay,ensure_ascii=False,indent=2),encoding='utf-8')
+                except OSError as exc:
+                    report(f'Debug-vertailun kirjoitusvirhe: {exc}')
                 report(f'Tallennetun OCR-syötteen vertailu: samat pikselit {replay["pixels_identical"]}, samat raakatekstit {replay["raw_identical"]}')
                 replay_verified = True
             completed = state['completed']+1
@@ -460,7 +477,7 @@ def process_live(receiver, settings, engine, stop, report, preview, output_root=
             count += 1
             diagnostics.update(processed=count)
             if settings.debug_frames:
-                save_png(output/'debug'/f'ruutu_{sequence:09d}.png',frame)
+                recorder.debug_image(output/'debug'/f'ruutu_{sequence:09d}.png',frame)
             now = time.monotonic()
             preview(frame,timestamp,count,recorder.saved)
             report(f'Live OCR {count/max(now-started,.001):.2f} näytettä/s | käsittelyviive {now-packet.monotonic:.2f} s | CSV {recorder.saved} | aktiivisia seurantoja {len(tracker.active)}')

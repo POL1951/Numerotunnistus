@@ -6,6 +6,7 @@ from contextlib import ExitStack
 import cv2
 import numpy as np
 from havaintoseuranta import context_box, text_height
+from tallennusrajat import RotatingText, StorageBudget
 
 
 def save_png(path, image):
@@ -15,17 +16,24 @@ def save_png(path, image):
     path.write_bytes(encoded.tobytes())
 
 
+ACCEPTED_FIELDS = ['numero', 'videon_aika_s', 'ocr_luottamus', 'ruutu',
+    'tarkistuskuva', 'seuranta_id', 'vahvistuksia', 'vahvistettu_aika_s', 'kuvan_aika_s',
+    'ensi_ocr_aika_s', 'kirjaus_videon_aika_s']
+
+
 class TrackRecorder:
-    def __init__(self, output, settings):
+    def __init__(self, output, settings, on_accepted=None, report=lambda text: None, on_storage=None):
+        self.on_accepted = on_accepted
+        self.report = report
+        self.storage = StorageBudget(output, report, on_storage)
+        self.pending_images = {}
         self.output, self.settings = output, settings
         self.stack = ExitStack()
         self.saved = self.uncertain = self.suppressed = self.completed = 0
         self.last_saved = {}
         self.accepted_by_track = {}
         self.files = []
-        self.accepted = self._csv('havainnot.csv', ['numero', 'videon_aika_s', 'ocr_luottamus', 'ruutu',
-            'tarkistuskuva', 'seuranta_id', 'vahvistuksia', 'vahvistettu_aika_s', 'kuvan_aika_s',
-            'ensi_ocr_aika_s', 'kirjaus_videon_aika_s'])
+        self.accepted = self._csv('havainnot.csv', ACCEPTED_FIELDS)
         self.review = self._csv('epavarmat.csv', ['numero', 'videon_aika_s', 'ocr_luottamus', 'ruutu',
             'tarkistuskuva', 'seuranta_id', 'havaintoja', 'syy', 'vaihtoehdot', 'kuvan_aika_s'])
         self.raw = self._file('raakahavainnot.jsonl')
@@ -34,7 +42,11 @@ class TrackRecorder:
         self.associations = self._file('liitokset.jsonl')
 
     def _file(self, name):
-        file = self.stack.enter_context((self.output / name).open('w', newline='', encoding='utf-8-sig' if name.endswith('.csv') else 'utf-8'))
+        if name.endswith('.jsonl'):
+            file = RotatingText(self.output / name, self.report)
+            self.stack.callback(file.close)
+        else:
+            file = self.stack.enter_context((self.output / name).open('w', newline='', encoding='utf-8-sig' if name.endswith('.csv') else 'utf-8'))
         self.files.append(file)
         return file
 
@@ -49,7 +61,7 @@ class TrackRecorder:
         if previous is not None and previous['score'] >= observation.confidence:
             return
         # Yksi edustava paras kuva/vaihtoehto/seuranta. Tiedoston sisältö ja kuvan aika raportoidaan yhdessä.
-        name = f'seuranta_{track.id:05d}_{observation.number}.png'
+        name = f'seuranta_{track.id:05d}_{observation.number}.jpg'
         annotated = frame.copy()
         cv2.polylines(annotated, [np.asarray(observation.polygon, np.int32)], True, (0, 160, 255), 3)
         cv2.putText(annotated, f'T{track.id}: {observation.number} {observation.confidence:.3f}',
@@ -57,12 +69,44 @@ class TrackRecorder:
         if self.settings.exclusion:
             a, b, c, d = self.settings.exclusion
             cv2.rectangle(annotated, (a, b), (c, d), (0, 0, 255), 2)
-        save_png(self.output / 'kuvat' / name, annotated)
-        from havaintoseuranta import box_of
-        x1, y1, x2, y2 = context_box(box_of(observation.polygon), frame.shape)
-        save_png(self.output / 'kuvat' / ('alue_' + name), frame[y1:y2, x1:x2])
-        track.evidence[observation.number] = {'path': 'kuvat/' + name, 'score': observation.confidence,
+        track.evidence[observation.number] = {'path': '', 'score': observation.confidence,
                                             'time': observation.time, 'frame': observation.frame}
+        self.pending_images.get(track.id, {}).pop(observation.number, None)
+        # Muistissa paras kuva/vaihtoehto; levylle vasta tapahtuman päätöshetkellä.
+        if not self.storage.images_stopped:
+            try:
+                ok, encoded = cv2.imencode('.jpg', annotated, [cv2.IMWRITE_JPEG_QUALITY, 90])
+            except cv2.error as exc:
+                self.report(f'Tarkistuskuvan koodausvirhe: {exc}')
+                return
+            if ok:
+                self.pending_images.setdefault(track.id, {})[observation.number] = (name, encoded.tobytes())
+            else:
+                self.report('Tarkistuskuvan JPEG-koodaus epäonnistui.')
+
+    def debug_image(self, path, image):
+        if not self.settings.debug_frames or self.storage.debug_stopped or self.storage.images_stopped:
+            return False
+        try:
+            ok, encoded = cv2.imencode('.png', image)
+        except cv2.error as exc:
+            self.report(f'Debug-kuvan koodausvirhe: {exc}')
+            return False
+        if not ok:
+            self.report('Debug-kuvan koodaus epäonnistui.')
+            return False
+        return self.storage.write_image(path, encoded.tobytes(), debug=True)
+
+    def _save_event_images(self, track, number):
+        pending = self.pending_images.pop(track.id, {})
+        review = sorted((n for n in track.evidence if n != number),
+                        key=lambda n: track.evidence[n]['score'], reverse=True)[:3 if number is None else 2]
+        selected = ([number] if number is not None else []) + review
+        for variant in selected:
+            if variant in pending:
+                name, data = pending[variant]
+                if self.storage.write_image(self.output / 'kuvat' / name, data):
+                    track.evidence[variant]['path'] = 'kuvat/' + name
 
     def finalize(self, track, interrupted=False):
         number, confirmation, reasons = track.decision(self.settings, interrupted)
@@ -90,14 +134,16 @@ class TrackRecorder:
             else:
                 self.last_saved[number] = track.last_visual
         alternatives = {n: len(frames) for n, frames in track.observations.items()}
+        self._save_event_images(track, number)
         if number is not None:
             evidence = track.evidence[number]
             first, last = confirmation[0], confirmation[-1]
             score = sum(o.confidence for o in confirmation) / len(confirmation)
-            self.accepted.writerow([number, f'{first.time:.6f}', f'{score:.6f}', first.frame, evidence['path'],
+            accepted_row = [number, f'{first.time:.6f}', f'{score:.6f}', first.frame, evidence['path'],
                                     track.id, len(confirmation), f'{last.time:.6f}', f"{evidence['time']:.6f}",
                                     f"{min(o.time for o in track.observations[number].values()):.6f}",
-                                    f'{track.last_visual:.6f}'])
+                                    f'{track.last_visual:.6f}']
+            self.accepted.writerow(accepted_row)
             self.saved += 1
             self.accepted_by_track[track.id] = number
         for variant, frames in track.observations.items():
@@ -121,11 +167,25 @@ class TrackRecorder:
             'todistejakson_rajat': track.boundary_events}, ensure_ascii=False) + '\n')
         self.completed += 1
         self.flush()
+        if number is not None and self.on_accepted is not None:
+            self.on_accepted(self.accepted_event(dict(zip(ACCEPTED_FIELDS, accepted_row))))
+
+    def accepted_event(self, row):
+        return row
 
     def flush(self):
         for file in self.files:
-            file.flush()
-            os.fsync(file.fileno())
+            try:
+                file.flush()
+                if not isinstance(file, RotatingText):
+                    os.fsync(file.fileno())
+            except OSError as exc:
+                self.report(f'Havainto-CSV:n kirjoitusvirhe: {exc}')
+                raise
+        self.storage.status()
 
     def close(self):
-        self.stack.close()
+        try:
+            self.stack.close()
+        finally:
+            self.storage.status(force=True)

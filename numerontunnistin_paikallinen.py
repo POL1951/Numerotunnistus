@@ -28,7 +28,7 @@ import cv2
 import numpy as np
 from PIL import Image, ImageTk
 from havaintoseuranta import BibTracker, intersection, box_of, context_box
-from seurannan_tallennus import TrackRecorder
+from seurannan_tallennus import TrackRecorder, ACCEPTED_FIELDS
 from live_video import LiveReceiver, LiveDiagnostics, discover_ndi, ndi_python, process_live, safe_url, safe_traceback, validate_url
 
 
@@ -210,7 +210,7 @@ def save_png(path, image):
     path.write_bytes(encoded.tobytes())
 
 
-def process_video(path, settings, engine, stop, report, preview, output_root=None):
+def process_video(path, settings, engine, stop, report, preview, output_root=None, on_accepted=None, on_storage=None):
     """OCR valituista näytteistä, liikkeenseuranta myös niiden välisistä ruuduista."""
     settings.validate()
     cap = cv2.VideoCapture(str(path))
@@ -239,7 +239,8 @@ def process_video(path, settings, engine, stop, report, preview, output_root=Non
                     'acceptance_policy': 'spatial_track_consensus_until_end'}
         (output / 'ajo.json').write_text(json.dumps(metadata, indent=2, ensure_ascii=False), encoding='utf-8')
         report(f'Tulokset: {output}. Vahvistus odottaa seurannan päättymistä.')
-        recorder = TrackRecorder(output, settings)
+        recorder = TrackRecorder(output, settings, on_accepted=on_accepted, report=report, on_storage=on_storage)
+        recorder.storage.status(force=True)
         index = next_index = sample = 0
         last_timestamp = -1.0
         while not stop.is_set() and cap.grab():
@@ -306,8 +307,8 @@ def process_video(path, settings, engine, stop, report, preview, output_root=Non
                             (int(px), max(18, int(py) - 4)), cv2.FONT_HERSHEY_SIMPLEX, 0.6, colour, 2)
             if settings.debug_frames:
                 name = f'ruutu_{index:09d}_{timestamp:.3f}s.png'
-                save_png(output / 'debug' / name, annotated)
-                save_png(output / 'debug' / ('alue_' + name), crop)
+                recorder.debug_image(output / 'debug' / name, annotated)
+                recorder.debug_image(output / 'debug' / ('alue_' + name), crop)
             recorder.flush()
             preview(annotated, timestamp, count, recorder.saved)
             sample += 1
@@ -398,7 +399,19 @@ class App:
     def __init__(self, root):
         self.root = root
         root.title("Paikallinen kilpailunumerontunnistin – MP4-testi")
-        root.geometry("1250x900")
+        root.geometry("1550x1000")
+        root.columnconfigure(0, weight=1)
+        root.columnconfigure(1, minsize=300)
+        root.rowconfigure(0, weight=1)
+        left = ttk.Frame(root)
+        left.grid(row=0, column=0, sticky='nsew')
+        footer = ttk.Frame(root)
+        footer.grid(row=1, column=0, columnspan=2, sticky='ew')
+        self.results_panel = ttk.Frame(root, width=300, padding=8)
+        self.results_panel.grid(row=0, column=1, sticky='nsew')
+        self.results_panel.grid_propagate(False)
+        self.results_panel.columnconfigure(0, weight=1)
+        self.results_panel.rowconfigure(2, weight=1)
         self.path = None
         self.cap = None
         self.frame = None
@@ -420,7 +433,7 @@ class App:
         self.live_diagnostics = LiveDiagnostics()
         self.worker_thread = None
         self.status = tk.StringVar(value="Avaa MP4-video. GPU/CPU tarkistetaan tunnistuksen alkaessa.")
-        source_row = ttk.Frame(root, padding=8)
+        source_row = ttk.Frame(left, padding=8)
         source_row.pack(fill='x')
         self.source_type = tk.StringVar(value='MP4-tiedosto')
         self.ndi_source = tk.StringVar(value='LOCALHOST (VM33_0176E)')
@@ -438,20 +451,20 @@ class App:
         self.connect_button.pack(side='left')
         self.disconnect_button = ttk.Button(source_row, text='Katkaise', command=self.disconnect_live)
         self.disconnect_button.pack(side='left', padx=5)
-        url_row = ttk.Frame(root, padding=(8,0))
+        url_row = ttk.Frame(left, padding=(8,0))
         url_row.pack(fill='x')
         ttk.Label(url_row, text='RTSP/HTTP-videovirran URL').pack(side='left')
         self.url_entry = ttk.Entry(url_row, textvariable=self.stream_url, width=60)
         self.url_entry.pack(side='left', padx=5, fill='x', expand=True)
         self.live_state = tk.StringVar(value='Live: katkaistu')
-        ttk.Label(root, textvariable=self.live_state).pack(anchor='w', padx=12)
+        ttk.Label(left, textvariable=self.live_state).pack(anchor='w', padx=12)
         self.live_metrics = tk.StringVar(value='OCR: ei käynnissä')
-        ttk.Label(root, textvariable=self.live_metrics).pack(anchor='w', padx=12)
+        ttk.Label(left, textvariable=self.live_metrics).pack(anchor='w', padx=12)
         self.live_counters = tk.StringVar(value='Vastaanotettu 0 | OCR:lle annettu 0 | OCR valmistunut 0')
-        ttk.Label(root, textvariable=self.live_counters, wraplength=1200).pack(anchor='w', padx=12)
+        ttk.Label(left, textvariable=self.live_counters, wraplength=1200).pack(anchor='w', padx=12)
         self.first_ocr_status = tk.StringVar(value='Ensimmäinen OCR-kutsu: ei alkanut')
-        ttk.Label(root, textvariable=self.first_ocr_status, wraplength=1200).pack(anchor='w', padx=12)
-        bar = ttk.Frame(root, padding=8)
+        ttk.Label(left, textvariable=self.first_ocr_status, wraplength=1200).pack(anchor='w', padx=12)
+        bar = ttk.Frame(left, padding=8)
         bar.pack(fill="x")
         self.open_button = ttk.Button(bar, text="Avaa MP4", command=self.open_video)
         self.open_button.pack(side="left")
@@ -465,7 +478,7 @@ class App:
         self.start_button.pack(side="left", padx=5)
         self.stop_button = ttk.Button(bar, text="Pysäytä", command=self.stop_run, state="disabled")
         self.stop_button.pack(side="left")
-        files = ttk.Frame(root, padding=(8, 0))
+        files = ttk.Frame(left, padding=(8, 0))
         files.pack(fill='x')
         self.load_settings_button = ttk.Button(files, text='Lataa asetukset', command=self.load_settings)
         self.load_settings_button.pack(side='left')
@@ -475,7 +488,7 @@ class App:
         self.help_button.pack(side='left', padx=5)
         self.area_values = tk.StringVar()
         ttk.Label(files, textvariable=self.area_values).pack(side='left', padx=10)
-        options = ttk.Frame(root, padding=8)
+        options = ttk.Frame(left, padding=8)
         options.pack(fill="x")
         self.interval = tk.StringVar(value="1.0")
         self.duplicate = tk.StringVar(value="10.0")
@@ -519,7 +532,7 @@ class App:
         combo.pack(side="left")
         self.device_combo = combo
         self.settings_widgets.append(combo)
-        more = ttk.Frame(root, padding=8)
+        more = ttk.Frame(left, padding=8)
         more.pack(fill='x')
         for title, var in [('Vahvistusruutuja (väh. 2)', self.confirmations),
                            ('Vahvistuksen aikaikkuna (s)', self.confirmation_window),
@@ -528,11 +541,11 @@ class App:
             entry = ttk.Entry(more, textvariable=var, width=7)
             entry.pack(side='left')
             self.settings_widgets.append(entry)
-        debug = ttk.Checkbutton(more, text='Debug: kaikki OCR-näytekuvat', variable=self.debug_frames)
+        debug = ttk.Checkbutton(more, text='Debug (enint. 256 MiB): kaikki OCR-näytekuvat', variable=self.debug_frames)
         debug.pack(side='left', padx=10)
         self.settings_widgets.append(debug)
-        drawing = ttk.Frame(root, padding=(12, 0))
-        dominance = ttk.Frame(root, padding=8)
+        drawing = ttk.Frame(left, padding=(12, 0))
+        dominance = ttk.Frame(left, padding=8)
         dominance.pack(fill='x')
         check = ttk.Checkbutton(dominance, text='Hyväksy vahvin vaihtoehto', variable=self.dominance_enabled)
         check.pack(side='left')
@@ -550,21 +563,37 @@ class App:
             radio = ttk.Radiobutton(drawing, text=title, variable=self.draw_target, value=value)
             radio.pack(side='left', padx=(0, 20))
             self.settings_widgets.append(radio)
-        ttk.Label(root, textvariable=self.actual_device).pack(anchor="w", padx=12)
-        ttk.Label(root, text="Valitse rajauksen tyyppi ja vedä hiirellä. Numero vahvistetaan useasta ruudusta ja kirjataan seurannan päättyessä.").pack(anchor="w", padx=12)
-        ttk.Label(root, text='Tulosten ajat ovat OCR-havaintoaikoja. Maalilinjan ylitystä ei mitata.').pack(anchor='w', padx=12)
-        self.canvas = tk.Canvas(root, background="#202020", highlightthickness=0)
+        ttk.Label(left, textvariable=self.actual_device).pack(anchor="w", padx=12)
+        ttk.Label(left, text="Valitse rajauksen tyyppi ja vedä hiirellä. Numero vahvistetaan useasta ruudusta ja kirjataan seurannan päättyessä.").pack(anchor="w", padx=12)
+        ttk.Label(left, text='Tulosten ajat ovat OCR-havaintoaikoja. Maalilinjan ylitystä ei mitata.').pack(anchor='w', padx=12)
+        self.observation_rows = []
+        self.observation_live = False
+        ttk.Label(self.results_panel, text='Tunnistetut numerot').grid(row=0, column=0, columnspan=2, sticky='w', pady=(0, 6))
+        self.export_button = ttk.Button(self.results_panel, text='Vie lista CSV:ksi', command=self.export_observations, state='disabled')
+        self.export_button.grid(row=1, column=0, columnspan=2, sticky='ew', pady=(0, 8))
+        self.observation_list = ttk.Treeview(self.results_panel, columns=('numero', 'aika'), show='headings')
+        self.observation_list.heading('numero', text='Numero')
+        self.observation_list.heading('aika', text='Videon aika')
+        for key in ('numero', 'aika'):
+            self.observation_list.column(key, width=125, minwidth=70, anchor='w')
+        self.observation_list.grid(row=2, column=0, sticky='nsew')
+        scroll = ttk.Scrollbar(self.results_panel, command=self.observation_list.yview)
+        scroll.grid(row=2, column=1, sticky='ns')
+        self.observation_list.configure(yscrollcommand=scroll.set)
+        self.canvas = tk.Canvas(left, background="#202020", highlightthickness=0)
         self.canvas.pack(fill="both", expand=True, padx=8, pady=8)
         self.canvas.bind("<ButtonPress-1>", self.drag_start)
         self.canvas.bind("<B1-Motion>", self.drag_move)
         self.canvas.bind("<ButtonRelease-1>", self.drag_end)
         self.canvas.bind("<Configure>", lambda e: self.draw())
-        self.seek = ttk.Scale(root, from_=0, to=1, command=self.seek_video)
+        self.seek = ttk.Scale(footer, from_=0, to=1, command=self.seek_video)
         self.seek.pack(fill="x", padx=12)
-        self.position = ttk.Label(root, text="0.000 s")
+        self.storage_status = tk.StringVar(value='Tulokset: ei istuntoa | debug-raja 256 MiB | kuvien vararaja 256 MiB')
+        ttk.Label(footer, textvariable=self.storage_status, wraplength=1450).pack(fill='x', padx=12)
+        self.position = ttk.Label(footer, text="0.000 s")
         self.position.pack(anchor="w", padx=12)
-        ttk.Label(root, textvariable=self.status, wraplength=1050).pack(fill="x", padx=12, pady=8)
-        self.log = tk.Text(root, height=5, state="disabled")
+        ttk.Label(footer, textvariable=self.status, wraplength=1050).pack(fill="x", padx=12, pady=8)
+        self.log = tk.Text(footer, height=5, state="disabled")
         self.log.pack(fill="x", padx=8, pady=(0, 8))
         self.setting_tooltips = []
         for widget in self.settings_widgets:
@@ -588,6 +617,47 @@ class App:
             except (OSError, ValueError, TypeError) as exc:
                 self.note(f'Viime asetusten palautus epäonnistui: {exc}')
         root.after(100, self.poll)
+
+    def add_observation(self, row):
+        if self.observation_live:
+            timestamp = float(row['vastaanotto_aikaleima'])
+            shown = datetime.fromtimestamp(timestamp).astimezone().strftime('%H:%M:%S')
+        else:
+            timestamp = float(row['videon_aika_s'])
+            seconds = max(0, int(timestamp))
+            shown = f'{seconds // 3600:02d}:{seconds // 60 % 60:02d}:{seconds % 60:02d}'
+        position = next((i for i, old in enumerate(self.observation_rows)
+                         if old['timestamp'] > timestamp), len(self.observation_rows))
+        follow = self.observation_list.yview()[1] >= 0.999
+        children = self.observation_list.get_children()
+        top = self.observation_list.identify_row(1)
+        if not top and children:
+            top = children[min(len(children)-1, int(self.observation_list.yview()[0]*len(children)))]
+        entry = dict(numero=row['numero'], aika=shown, timestamp=timestamp)
+        self.observation_rows.insert(position, entry)
+        item = self.observation_list.insert('', position, values=(entry['numero'], shown))
+        if follow:
+            self.observation_list.see(self.observation_list.get_children()[-1])
+        elif top:
+            index = self.observation_list.index(top)
+            self.observation_list.yview_moveto(index / len(self.observation_rows))
+        self.export_button.configure(state='normal')
+
+    def export_observations(self):
+        path = filedialog.asksaveasfilename(title='Tallenna nimellä',
+            defaultextension='.csv', initialfile='havainnot.csv',
+            filetypes=[('CSV-tiedosto', '*.csv')])
+        if not path:
+            return
+        try:
+            with open(path, 'w', encoding='utf-8-sig', newline='') as file:
+                writer = csv.writer(file, delimiter=';')
+                writer.writerow(['numero', 'kellonaika' if self.observation_live else 'videon_aika'])
+                writer.writerows((row['numero'], row['aika']) for row in self.observation_rows)
+        except OSError as exc:
+            messagebox.showerror('CSV-vienti', str(exc))
+            return
+        self.note(f'Viety {len(self.observation_rows)} havaintoa: {path}')
 
     def show_help(self):
         path = BASE / 'ASETUKSET.md'
@@ -906,6 +976,11 @@ class App:
         except OSError as exc:
             self.note(f'Viime asetusten tallennus epäonnistui: {exc}')
         self.playing = self.source_type.get() != 'MP4-tiedosto'
+        self.observation_live = settings.source_type != 'MP4-tiedosto'
+        self.observation_list.heading('aika', text='Kellonaika' if self.observation_live else 'Videon aika')
+        self.observation_rows.clear()
+        self.observation_list.delete(*self.observation_list.get_children())
+        self.export_button.configure(state="disabled")
         self.stop.clear()
         self.live_diagnostics = LiveDiagnostics()
         self.set_busy(True)
@@ -919,10 +994,9 @@ class App:
         report = lambda text: self.events.put(("status", text))
         diagnostics = self.live_diagnostics
         try:
+            diagnostics.report = report
             if settings.source_type != 'MP4-tiedosto':
-                diagnostics.attach(BASE/'paikalliset_tulokset/live_diagnostiikka'/
-                                   (datetime.now().strftime('%Y%m%d_%H%M%S_%f')+'.jsonl'))
-                report(f'Live-työntekijäsäie käynnistyi. Diagnostiikka: {diagnostics.path}')
+                diagnostics.attach(BASE / 'paikalliset_tulokset' / 'live_diagnostiikka' / 'tyontekija.jsonl')
             diagnostics.update(phase='OCR-mallin alustus')
             if self.engine is None or self.engine.preference != settings.device:
                 self.engine = None
@@ -939,10 +1013,14 @@ class App:
                     pass
                 self.frames.put_nowait((frame, timestamp, count, saved))
             if settings.source_type == 'MP4-tiedosto':
-                output, summary = process_video(path, settings, self.engine, self.stop, report, preview)
+                output, summary = process_video(path, settings, self.engine, self.stop, report, preview,
+                    on_accepted=lambda row: self.events.put(("observation", row)),
+                    on_storage=lambda state: self.events.put(("storage", state)))
             else:
                 output, summary = process_live(path, settings, self.engine, self.stop, report,
-                    lambda *a: None, diagnostics=diagnostics)  # Esikatselu pysyy pääsäikeessä.
+                    lambda *a: None, diagnostics=diagnostics,
+                    on_accepted=lambda row: self.events.put(("observation", row)),
+                    on_storage=lambda state: self.events.put(("storage", state)))  # Esikatselu pysyy pääsäikeessä.
             self.events.put(('final_counts', summary))
             report(f"{'Pysäytetty' if summary['stopped'] else 'Valmis'}: {summary['processed_frames']} kuvaa, "
                    f"{summary['saved_detections']} hyväksyttyä, {summary['uncertain_candidates']} tarkistettavaa vaihtoehtoa, "
@@ -1001,7 +1079,14 @@ class App:
                 kind, value = self.events.get_nowait()
             except queue.Empty:
                 break
-            if kind == "done":
+            if kind == "storage":
+                warning = ' | KUVATALLENNUS KESKEYTETTY' if value['images_stopped'] else ''
+                low = ' | VÄHÄN LEVYTILAA' if value['free'] < 1024**3 else ''
+                debug = ' | debug-raja saavutettu' if value['debug_stopped'] else ''
+                self.storage_status.set(f"Tulokset: {value['output']} | istunto {value['used']/1024**2:.1f} MiB | vapaa {value['free']/1024**3:.2f} GiB | debug-raja 256 MiB{warning}{low}{debug}")
+            elif kind == "observation":
+                self.add_observation(value)
+            elif kind == "done":
                 self.set_busy(False)
                 self.live_metrics.set('OCR: pysäytetty')
             elif kind == 'live_state':
